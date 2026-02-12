@@ -1,0 +1,101 @@
+version: '3.8'
+
+services:
+  # --- BANCO DE DADOS ---
+  postgres:
+    image: postgres:15-alpine
+    container_name: nexus_db
+    restart: always
+    environment:
+      POSTGRES_USER: vpn_user
+      POSTGRES_PASSWORD: ${DB_PASS:-YOUR_STRONG_POSTGRES_PASSWORD} # Use .env ou um padrão
+      POSTGRES_DB: vpn_nexus
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+      - ./backend/schema.sql:/docker-entrypoint-initdb.d/init.sql
+    networks:
+      - internal_net
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U vpn_user -d vpn_nexus"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+
+  # --- API SERVER ---
+  api:
+    build: 
+      context: ./backend
+      dockerfile: Dockerfile
+    container_name: nexus_api
+    restart: unless-stopped
+    command: npm start
+    env_file:
+      - ./backend/.env # Carrega as variáveis do arquivo .env
+    networks:
+      - internal_net
+    depends_on:
+      postgres:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "wget", "--no-verbose", "--tries=1", "--spider", "http://localhost:3001/health"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+
+  # --- BACKGROUND WORKER (CRON) ---
+  worker:
+    build: 
+      context: ./backend
+      dockerfile: Dockerfile
+    container_name: nexus_worker
+    restart: unless-stopped
+    command: npm run worker
+    env_file:
+      - ./backend/.env # Compartilha o mesmo ambiente da API
+    networks:
+      - internal_net
+    depends_on:
+      postgres:
+        condition: service_healthy
+
+  # --- N8N AUTOMATION (Opcional) ---
+  n8n:
+    image: n8nio/n8n
+    container_name: nexus_n8n
+    restart: always
+    ports:
+      - "5678:5678"
+    environment:
+      - N8N_HOST=${DOMAIN_NAME:-seu-dominio.com}
+      - N8N_PORT=5678
+      - N8N_PROTOCOL=https
+      - NODE_ENV=production
+      - WEBHOOK_URL=https://${DOMAIN_NAME:-seu-dominio.com}/
+      - GENERIC_TIMEZONE=America/Sao_Paulo
+    volumes:
+      - n8n_data:/home/node/.n8n
+    networks:
+      - internal_net
+
+  # --- FRONTEND (React Build + Nginx) ---
+  frontend:
+    container_name: nexus_frontend
+    restart: always
+    build:
+      context: .
+      dockerfile: Dockerfile
+    ports:
+      - "80:80"
+    networks:
+      - internal_net
+    depends_on:
+      api:
+        condition: service_healthy
+
+networks:
+  internal_net:
+    driver: bridge
+
+volumes:
+  postgres_data:
+  n8n_data:
